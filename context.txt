@@ -1,0 +1,73 @@
+Context {
+    vars: {
+        "out": Mul(
+            Pow(
+                Term(
+                    Float(
+                        2.718281828459045,
+                    ),
+                ),
+                Mul(
+                    Term(
+                        Complex(
+                            Complex {
+                                re: 0.0,
+                                im: 18.84955592153876,
+                            },
+                        ),
+                    ),
+                    Term(
+                        Var(
+                            "x",
+                        ),
+                    ),
+                ),
+            ),
+            Pow(
+                Term(
+                    Float(
+                        2.718281828459045,
+                    ),
+                ),
+                Mul(
+                    Pow(
+                        Term(
+                            Var(
+                                "x",
+                            ),
+                        ),
+                        Term(
+                            Float(
+                                2.0,
+                            ),
+                        ),
+                    ),
+                    Term(
+                        Float(
+                            -1.0471975511965976,
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        "e": Term(
+            Float(
+                2.718281828459045,
+            ),
+        ),
+        "pi": Term(
+            Float(
+                3.141592653589793,
+            ),
+        ),
+        "i": Term(
+            Complex(
+                Complex {
+                    re: 0.0,
+                    im: 1.0,
+                },
+            ),
+        ),
+    },
+    funcs: {},
+}
