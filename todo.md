@@ -1,9 +1,16 @@
 
 # TODO
 
+## Important
+
+- [ ] rework simplification and evaluation
+  - [ ] add a field to the parsel `Fn` struct to include an optional `(recursive)` after the `fn` keyword
+  - [ ] change `.simplify()` to return an `Expr` and take in a variable name
+  - [ ] make a `set_var` function for the new struct `VarContext` that expands a variable to some `Expr`
+  - [ ] change `.evaluate()` to evaluate an Expr & recursive functions
+
 ## Maintenance
 
-- [ ] remove dead code
 - [ ] comment code
   - [ ] comment `expr.rs`
   - [ ] comment `parse.rs`
@@ -11,9 +18,12 @@
 - [ ] make tests
 - [ ] make docs
   - [ ] update `README.md`
-- [ ] make a repo
+  - [x] make spec for the DSL
+- [x] make a repo
+- [ ] organize files
 - [ ] edit if fns are public/private
 - [ ] possibly split `expr.rs` into multiple files
+- [ ] remove dead code
 
 ## Features
 
@@ -25,6 +35,7 @@
 
 ## Display
 
+- [ ] decide if i want to completely change the way things are displayed
 - [ ] display graphs
   - [x] draw lines
   - [x] draw axis
