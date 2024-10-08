@@ -189,8 +189,13 @@ impl Context {
         return Some(out);
     }
 
+    #[allow(unused_variables)]
+    pub fn evaluate1_with(&self, var: &str, i: &str, range: RangeInclusive<f64>, steps: usize, print: bool) -> (f64, Option<Term>) {
+        unimplemented!()
+    }
+
     #[allow(dead_code)]
-    pub fn as_fn_x(&self, _: &str) -> Box<dyn Fn(f64) -> Option<Term>> {
+    pub fn as_fn(&self, _: &str) -> Box<dyn Fn(f64) -> Option<Term>> {
         unimplemented!()
     }
 
