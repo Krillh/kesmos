@@ -22,7 +22,6 @@ pub fn convert(statements: Vec<parse::Statement>) -> expr::Context {
             parse::Statement::Fn { kw_fn: _, name, args, kw_eq: _, body , kw_semi: _} => {
                 c = c.func_string(&name.to_string(), args.into_inner().iter().map(|n| n.to_string()).collect(), *convert_expr(body));
             }
-            // parse::Statement::Comment { kw_comment: _, content: _ } => (),
         }
     }
     return c;

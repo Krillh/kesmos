@@ -5,7 +5,7 @@ This is where the data for the parsel parser is.
 
 
 use parsel::{
-    self, ast::{Any, Brace, LeftAssoc, LitFloat, LitInt, Many, Paren, Punctuated, Word}, parse_str, syn::{token::{Caret, Comma, Eq, Fn, Let, Minus, Plus, Pound, Semi, Slash, Star}, Ident, Token}, Parse, ToTokens
+    self, ast::{Brace, LeftAssoc, LitFloat, LitInt, Many, Paren, Punctuated}, parse_str, syn::{token::{Caret, Comma, Eq, Fn, Let, Minus, Plus, Semi, Slash, Star}, Ident, Token}, Parse, ToTokens
 };
 
 // Custom keywords
@@ -57,10 +57,6 @@ pub enum Statement {
         body: Expr,
         kw_semi: Semi,
     },
-    // Comment{
-    //     kw_comment: Pound,
-    //     content: Any<Word>,
-    // },
 }
 
 
