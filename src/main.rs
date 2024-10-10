@@ -5,6 +5,7 @@ const C_DEBUG_LEVEL: u8 = 0;
 const E_DEBUG_LEVEL: u8 = 0;
 
 mod expr;
+mod expr2;
 mod perf_test;
 mod parse;
 mod convert;
@@ -14,7 +15,7 @@ use expr::{Context, f::*};
 
 fn main() {
     //render::render();
-    parse_test();
+    //parse_test();
     //perf_test::sin_cos_plane();
     //perf_test::multithread();
     // println!();
@@ -28,9 +29,9 @@ fn parse_test() {
 
     let c = convert::convert(p).simplify(true);
 
-    let _ = std::fs::write("context.txt", format!("{c:#?}"));
+    let _ = std::fs::write("ctx.txt", format!("{c:#?}"));
     
-    let o = c.evaluate_with_x("out", -3.0..=3.0, 500, true).unwrap();
+    let o = c.evaluate_with_x("der", -3.0..=3.0, 500, true).unwrap();
     let mut o_s = String::new();
     o.iter().for_each(|(i,ot)| {
         o_s.push('\n'); o_s.push_str(&expr::fmt_1((*i,ot.clone().unwrap())));

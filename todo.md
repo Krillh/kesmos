@@ -3,6 +3,7 @@
 
 ## Important
 
+- [ ] redo the whole expr module
 - [ ] rework simplification and evaluation
   - [ ] add a field to the parsel `Fn` struct to include an optional `(recursive)` after the `fn` keyword
   - [ ] change `.simplify()` to return an `Expr` and take in a variable name
