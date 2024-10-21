@@ -32,18 +32,7 @@
 
 ## Display
 
-- [ ] decide if i want to completely change the way things are displayed
-- [ ] display graphs
-  - [x] draw lines
-  - [x] draw axis
-  - [ ] label axis
-  - [ ] add arrows to axis
-  - [ ] draw tickmarks
-  - [ ] label tickmarks
-- [x] be able to move/rotate graphs
-- [x] continuously update graphs
-- [ ] implement editor
-- [ ] make web runnable
+- [ ] move to egui
 
 ## Optional Optimization
 
