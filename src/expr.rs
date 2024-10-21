@@ -1,951 +1,643 @@
 
-use compact_str::CompactString;
-use num::complex::Complex64;
-use num::traits::{Pow, Inv};
-use num::{Zero, One};
-use num_complex::ComplexFloat;
-use std::collections::HashMap;
-use std::ops::{Add, Mul, Neg, RangeInclusive};
-use std::time::Instant;
+/*
+This file holds multiple purposesm all surrounding the computation of points
+that are heavily intertwined and for that reason, kept in the same file.
 
-use crate::{C_DEBUG_LEVEL, E_DEBUG_LEVEL};
+Steps taken to calculate points:
+- A `Context` is generated.
+- `.simplify_for_var()` is called on that context to generate an `Expr` (an
+expression tree) and the needed recursive functions. Non recursive functions
+are expanded to be inline so they can simplify.
+    - The simplification starts by expanding variables to be inline.
+    // - Then (non recursive) functions are expanded
+    - Constant expressions are reduced as much as possible.
+    - Commutable operations are reordered both to group constants together
+    and to follow standards that make other steps easier.
+    - Constants are reduced again.
+    // - Expressions are factored (undistributed) as much as possible. 
+    // - Reordering again. // * may be unnessecary
+    // - Constant reduction again. // * may be unnessecary
+    - Special cases like adding zero are simplified.
+    // - Divisions are simplified as much as possible.
+    // - Small integer powers are expanded to speed up computation.
+*/
 
-#[allow(dead_code)]
+
+
+use std::{collections::HashMap, ops::{Add, Mul}, str::FromStr, usize};
+use num::{pow::Pow, One, Zero};
+use num_complex::{Complex64, ComplexFloat};
+
+pub type Exp = Box<Expr>;
+
+
 pub mod f {
+    use super::{Exp, Expr, Term};
 
-    use super::{Expr, Term};
+    pub fn num(n: f64) -> Exp { Expr::from(Term::from(n)).r#box() }
+    pub fn term(t: Term) -> Exp { Expr::from(t).r#box() }
 
-    macro_rules! trig_fn {
-        ($f:ident, $n:ident) => {
-            pub fn $f(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::$n(a)) }
-        };
-    }
+    pub fn neg(a: Exp) -> Exp { mul(num(-1.0), a) }
+    pub fn inv(a: Exp) -> Exp { pow(a, num(-1.0)) }
 
-    pub fn num(n: f64) -> Box<Expr> {
-        Box::new(Expr::Term(n.into()))
-    }
-    pub fn var(s: &str) -> Box<Expr> {
-        Box::new(Expr::Term(Term::Var(s.into())))
-    }
+    pub fn add(a: Exp, b: Exp) -> Exp { Expr::Add(vec![*a, *b]).r#box() }
+    pub fn mul(a: Exp, b: Exp) -> Exp { Expr::Mul(vec![*a, *b]).r#box() }
+    pub fn pow(a: Exp, b: Exp) -> Exp { Expr::Pow(a, b).r#box() }
 
-    pub fn add(a: Box<Expr>, b: Box<Expr>) -> Box<Expr>  { Box::new(Expr::Add(a, b)) }
-    pub fn sub(a: Box<Expr>, b: Box<Expr>) -> Box<Expr>  { Box::new(Expr::Add(a, neg(b))) }
-    pub fn mul(a: Box<Expr>, b: Box<Expr>) -> Box<Expr>  { Box::new(Expr::Mul(a, b)) }
-    pub fn div(a: Box<Expr>, b: Box<Expr>) -> Box<Expr>  { Box::new(Expr::Mul(a, inv(b))) }
-    pub fn pow(a: Box<Expr>, b: Box<Expr>) -> Box<Expr>  { Box::new(Expr::Pow(a, b)) }
+    pub fn sub(a: Exp, b: Exp) -> Exp { add(a, neg(b)) }
+    pub fn div(a: Exp, b: Exp) -> Exp { mul(a, inv(b)) }
 
-    /// Root a of b
-    pub fn root(a: Box<Expr>, b: Box<Expr>) -> Box<Expr> { Box::new(Expr::Pow(b, Box::new(Expr::Inv(a)))) }
-
-    pub fn ln(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Ln(a)) }
-
-    /// Log base a of b
-    pub fn log(a: Box<Expr>, b: Box<Expr>) -> Box<Expr> { div(ln(b), ln(a)) }
-
-    pub fn abs(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Abs(a)) }
-    pub fn neg(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Neg(a)) }
-    pub fn inv(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Inv(a)) }
-
-    pub fn sq(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Pow(a, num(2.0))) }
-    pub fn cb(a: Box<Expr>) -> Box<Expr> { Box::new(Expr::Pow(a, num(3.0))) }
-
-    pub fn sqrt(a: Box<Expr>) -> Box<Expr> { root(a, num(2.0)) }
-    pub fn cbrt(a: Box<Expr>) -> Box<Expr> { root(a, num(3.0)) }
-
-    pub fn func(n: &str, a: Vec<Box<Expr>>) -> Box<Expr> { Box::new(Expr::Fn(n.to_string(), a.iter().map(|v| *v.clone()).collect())) }
-
-    trig_fn!(sin, Sin);
-    trig_fn!(cos, Cos);
-    trig_fn!(tan, Tan);
-    trig_fn!(sinh, Sinh);
-    trig_fn!(cosh, Cosh);
-    trig_fn!(tanh, Tanh);
-    trig_fn!(asin, Asin);
-    trig_fn!(acos, Acos);
-    trig_fn!(atan, Atan);
-    trig_fn!(asinh, Asinh);
-    trig_fn!(acosh, Acosh);
-    trig_fn!(atanh, Atanh);
-
+    pub fn func(name: String, args: Vec<Exp>) -> Exp { Expr::Fn(name, args).r#box() }
 }
 
-pub fn fmt_1(n: (f64, Term)) -> CompactString {
-    match n.1 {
-        Term::Float(a) => format!("({}, {})", n.0, a).into(),
-        Term::Complex(a) => format!("{:00.2?}, {:00.2?}, {:00.2?}", n.0, a.re, a.im).into(),
-        Term::Var(_) => panic!(),
-    }
-}
 
-pub fn f_2_c(n: (f64, Term)) -> (f64, f64, f64) {
-    match n.1 {
-        Term::Complex(a) => (n.0, a.re, a.im),
-        _ => panic!(),
-    }
-}
-
-// pub fn fmt_2(n: (f64, f64, Term)) -> String {
-//     match n.2 {
-//         Term::Float(a) => format!("({}, {}, {})", n.0, n.1, a),
-//         Term::Complex(a) => format!("({}, {}, {}, {})", n.0, n.1, a.re, a.im),
-//         Term::Var(_) => panic!(),
-//     }
-// }
-
-
-#[derive(Debug, Clone)]
+/// The context of the input. This is essentially just the whole parsed input.
+#[derive(Debug, Default)]
 pub struct Context {
-    vars: HashMap<String, Expr>,
-    funcs: HashMap<String, Func>,
+    vars: HashMap<String, Exp>,
+    fns: HashMap<String, Func>,
 }
 impl Context {
-    /// Creates a new `Context`
     pub fn new() -> Self {
-        Self {
-            vars: HashMap::new(),
-            funcs: HashMap::new(),
-        }
-        .var("pi", std::f64::consts::PI.into())
-        .var("e", std::f64::consts::E.into())
-        .var("i", Term::Complex(Complex64::i()).into())
-    }
-
-    /// Add a variable to the `Context`
-    pub fn var(mut self, name: &str, val: Expr) -> Self {
-        self.vars.insert(name.to_string(), val);
-        return self;
-    }
-
-    /// Add a function to the `Context`
-    pub fn func(mut self, name: &str, args: Vec<&str>, body: Expr) -> Self {
-        self.funcs.insert(name.to_string(), Func {args: args.iter().map(|n| n.to_string()).collect(), body});
-        return self;
-    }
-
-    /// Add a function to the `Context`. This version takes a vec of strings for ease of use in convert.rs.
-    pub fn func_string(mut self, name: &str, args: Vec<String>, body: Expr) -> Self {
-        self.funcs.insert(name.to_string(), Func {args, body});
-        return self;
-    }
-
-    /// Simplify all the expressions in the current context as much as possible.
-    /// 
-    /// Functions are expanded to be in line.
-    /// 
-    /// Has the following steps (in order):
-    /// - Simplifies constant expressions into constant values as far as possible
-    /// (returns directly from a constant reduction if the value(s) were not further simplified)
-    /// - Simplifies some special cases: a+0, 0+b, a\*0, 0\*b, a\*1, 1\*b, a^0, 0^b, a^1, 1^b 
-    /// (returns directly from these cases)
-    /// - Rearranges terms in nested expressions with the same order of operations to 
-    /// maximize constant reduction and minimize the depth of the expression tree
-    pub fn simplify(mut self, print: bool) -> Self {
-        let timer = Instant::now();
-        // Attempt to simplify variables
-        for k in self.vars.clone().keys() {
-            if C_DEBUG_LEVEL >= 1 {println!("\nsimplify {k:?}")};
-            let e = self.vars.get(k).unwrap();
-            let n = e.clone().try_simplify(&self);
-            self.vars.insert(k.clone(), n);
-        };
-        if print {println!("Simplified in {:?}", timer.elapsed())};
-        return self.trim_funcs();
-    }
-
-    fn trim_funcs(mut self) -> Self {
-        self.funcs = HashMap::new();
-        return self;
-    }
-
-    /// Attempts to completely evaluate a variable
-    pub fn evaluate(&self, var: &str) -> Option<Term> {
-        let v = self.vars.get(var).unwrap_or_else(|| panic!("var `{var}` not found!")).clone();
-        if E_DEBUG_LEVEL >= 1 {println!("evaluate {var} : {v:?}")};
-        v.try_eval(&self)
-    }
-
-    // /// Attempts to completely evaluate a variable with given inputs
-    // pub fn evaluate_with_inputs(&self, var: &str, i: Vec<(&str, Term)>) -> Option<Term> {
-    //     let mut c = self.clone();
-    //     for (n,v) in i.iter() {
-    //         c.vars.insert(n.to_string(), v.clone().into());
-    //     };
-    //     c.evaluate(var)
-    // }
-
-    /// Attempts to evaluate a variable for each x in a range
-    pub fn evaluate_with_x(&self, var: &str, range: RangeInclusive<f64>, steps: usize, print: bool) -> Option<Vec<(f64, Option<Term>)>> {
-        let timer = Instant::now();
-        let mut c = self.clone();
-        let step = (range.end() - range.start()) / (steps as f64);
-        let mut out = Vec::new();
-        for s in 0..=steps {
-            let x = (s as f64 * step) + range.start();
-            c.vars.insert("x".to_string(), x.into());
-            // println!();
-            out.push((x, c.evaluate(var)));
-        };
-        if print {println!("calculated {steps} points in {:?}", timer.elapsed())};
-        return Some(out);
-    }
-
-    #[allow(unused_variables)]
-    pub fn evaluate1_with(&self, var: &str, i: &str, range: RangeInclusive<f64>, steps: usize, print: bool) -> (f64, Option<Term>) {
-        unimplemented!()
-    }
-
-    #[allow(dead_code)]
-    pub fn as_fn(&self, _: &str) -> Box<dyn Fn(f64) -> Option<Term>> {
-        unimplemented!()
-    }
-
-    pub fn evaluate_with_xy(&self, var: &str, x_range: RangeInclusive<f64>, x_steps: usize, y_range: RangeInclusive<f64>, y_steps: usize) -> Option<Vec<(f64, f64, Option<Term>)>> {
-        let timer = Instant::now();
-        let mut c = self.clone();
-        let x_step = (x_range.end() - x_range.start()) / (x_steps as f64);
-        let y_step = (y_range.end() - y_range.start()) / (y_steps as f64);
-        let mut out = Vec::new();
-        for xs in 0..=x_steps {
-            let x = (xs as f64 * x_step) + x_range.start();
-            c.vars.insert("x".to_string(), x.into());
-            c = c.simplify(false);
-            // println!();
-            for ys in 0..=y_steps {
-                let y = (ys as f64 * y_step) + y_range.start();
-                c.vars.insert("y".to_string(), y.into());
-                out.push((x, y, c.evaluate(var)));
-            }
-        };
-        println!("calculated {} points in {:?}", x_steps*y_steps, timer.elapsed());
-        return Some(out);
-    }
-
-    fn in_fn(&self, name: String, args: Vec<Expr>) -> Self {
-        let mut s = self.clone();
-        let f = s.funcs.get(&name).unwrap();
-        for i in 0..args.len() {
-            if !s.vars.contains_key(&f.args[i]) {
-                s.vars.insert(f.args[i].clone(), args[i].clone());
-            }
-        };
+        let mut s = Self::default();
+        s.def_var("e", *f::num(std::f64::consts::E));
+        s.def_var("pi", *f::num(std::f64::consts::PI));
+        s.def_var("i", *f::term(Complex64::I.into()));
         return s;
     }
-
-    fn try_fn_eval(&self, name: String, args: Vec<Expr>) -> Option<Term> {
-        let f = self.funcs.get(&name)?;
-        f.body.clone().try_eval(&self.in_fn(name, args))
+    pub fn def_var(&mut self, var: &str, val: Expr) {
+        self.vars.insert(var.to_string(), Box::new(val));
+    }
+    pub fn def_func(&mut self, name: &str, recursive: bool, args: Vec<String>, body: Expr) {
+        self.fns.insert(name.to_string(), Func { recursive, args, body });
     }
 
+    /// Checks for illigal recursion. This includes:
+    /// - Variables defined using themselves
+    /// - Functions not labeled as recursive calling themselves.
+    /// Even through misdirection (`f` calls `g` & `g` calls `f`)
+    pub fn check_for_illigal_recursion(&self) -> Result<(), Vec<String>> {
+        let mut errs = Vec::new();
+
+        // For each variable, check if it is recursive.
+        for (var, val) in self.vars.iter() {
+            if val.has_var(var, &self) {
+                errs.push(format!("ERROR: variable {var} is recursive! variables cannot be recursive."));
+            }
+        }
+
+        // For each function, check if it's recursive.
+        for (name, f) in self.fns.iter() {
+            if f.body.has_fn(name, &self) {
+                errs.push(format!("ERROR: function {name} is recursive! functions that aren't labeled as so cannot be recursive.\n\t(Try adding `(recursive)` after the `fn` keyword)"));
+            }
+        }
+        
+        if errs.is_empty() {return Ok(())} // yay! no errors!
+        
+        return Err(errs); // ono! errors!
+    }
+
+    /// Simplifies a specific variable into an expression and recursive functions.
+    pub fn simplify_for_var(&self, var: &str) -> (Expr, HashMap<String, Func>) {
+        let mut e = *self.vars.get(&var.to_string()).unwrap().clone();
+
+        println!(" - expanding vars");
+        e = e.expand_vars(&self.vars.clone().into_iter().collect());
+        println!(" - expanding funcs");
+        e = e.expand_funcs(&self.fns.clone().into_iter().collect());
+        println!(" - expanding vars");
+        e = e.expand_vars(&self.vars.clone().into_iter().collect());
+        println!(" - flattening");
+        e = e.flatten();
+        println!(" - reduce consts");
+        e = e.reduce_const();
+
+        // e = e.factor();
+        e = e.special_cases();
+        // e = e.simplify_div();
+        // e = e.expand_pow();
+        
+        // Only return the functions that are both recursive and called to evaluate var
+        let mut funcs = HashMap::new();
+        for (k, v) in self.fns.clone().into_iter().filter(|f| f.1.recursive & e.has_fn(&f.0, &self)).collect::<Vec<(String, Func)>>() {
+            funcs.insert(k, v);
+        };
+
+        return (e, funcs);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Func {
+    recursive: bool,
     args: Vec<String>,
     body: Expr,
 }
 
-#[derive(Debug, Clone)]
+
+/// An expression tree node.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Term(Term),
-    Add(Box<Expr>, Box<Expr>),
-    Mul(Box<Expr>, Box<Expr>),
-    Pow(Box<Expr>, Box<Expr>),
-    Ln(Box<Expr>),
-    Neg(Box<Expr>),
-    Inv(Box<Expr>),
-    Abs(Box<Expr>),
-    Sin(Box<Expr>),
-    Cos(Box<Expr>),
-    Tan(Box<Expr>),
-    Sinh(Box<Expr>),
-    Cosh(Box<Expr>),
-    Tanh(Box<Expr>),
-    Asin(Box<Expr>),
-    Acos(Box<Expr>),
-    Atan(Box<Expr>),
-    Asinh(Box<Expr>),
-    Acosh(Box<Expr>),
-    Atanh(Box<Expr>),
-    Fn(String, Vec<Expr>),
+    Add(Vec<Expr>),
+    Mul(Vec<Expr>),
+    Pow(Exp, Exp),
+    Fn(String, Vec<Exp>),
 }
 impl Expr {
-    /// Simplifies the current `Expr` as much as possible.
-    fn try_simplify(self, c: &Context) -> Expr {
-        if C_DEBUG_LEVEL >= 2 {println!(" - try_simplify {self:?}")};
-        /*
-        rearrangement example (e is considered a constant in this example, as it will always be a defined variable in any instance of `Context` made with `Contect::new()`):
-
-        o: mul
-            -oa: 17.0
-            -ob: mul
-                -obta: e
-                -obtb: t
-        
-        if oa is const:
-            if ob is `mul`:
-                if obta is const:
-                    -mul
-                        -obtb: t
-                        -mul
-                            -oa: 17.0
-                            -obta: e
-                    then simplify
-                check if obtb is const and rearrange
-        check if ob is const:
-            check if oa is `mul`:
-                check if oata is const and rearrange
-                check if oatb is const and rearrange
-
-        if conditions are right, it swaps the nodes around so the two constant terms are grouped together,
-        so it can then be simplified into a `Term` and therefore the depth of the tree is reduced.
-        */
-        match &self {
-            Expr::Term(term) => term.expand(c).unwrap_or(self),
-            Expr::Add(a, b) => {
-                if let (Some(ta), Some(tb)) = (a.try_term(), b.try_term()) {
-                    if !ta.is_var() & !tb.is_var() {
-                        return Expr::Term(ta.add(tb));
-                    };
-                }
-                let oa = a.clone().try_simplify(c);
-                let ob = b.clone().try_simplify(c);
-                let o = Expr::Add(Box::new(oa.clone()), Box::new(ob.clone()));
-                if !o.has_var() {return o.try_simplify(c)}
-                // Special cases (a+0, 0+b)
-                if let Expr::Term(ta) = oa.clone() {
-                    if ta.is_zero() { // 0 + b
-                        return ob;
-                    }
-                }
-                if let Expr::Term(tb) = ob.clone() {
-                    if tb.is_zero() { // a + 0
-                        return oa;
-                    }
-                }
-                // Rearrangement
-                if let Expr::Term(ta) = oa.clone() { // is oa const
-                    if let Expr::Add(oba, obb) = ob.clone() { // is ob `add`
-                        if let Expr::Term(obta) = *oba { // is obta const
-                            return Expr::Add(
-                                obb,
-                                Box::new(Expr::Add(
-                                    Box::new(ta.into()),
-                                    Box::new(obta.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(obtb) = *obb { // is obtb const
-                            return Expr::Add(
-                                oba,
-                                Box::new(Expr::Add(
-                                    Box::new(ta.into()),
-                                    Box::new(obtb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                if let Expr::Term(ta) = ob.clone() { // is ob const
-                    if let Expr::Add(oaa, oab) = oa.clone() { // is oa `add`
-                        if let Expr::Term(oata) = *oaa { // is oata const
-                            return Expr::Add(
-                                oab,
-                                Box::new(Expr::Add(
-                                    Box::new(ta.into()),
-                                    Box::new(oata.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(oatb) = *oab { // is obtb const
-                            return Expr::Add(
-                                oaa,
-                                Box::new(Expr::Add(
-                                    Box::new(ta.into()),
-                                    Box::new(oatb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                return o;
-            },
-            Expr::Mul(a, b) => {
-                if let (Some(ta), Some(tb)) = (a.try_term(), b.try_term()) {
-                    if !ta.is_var() & !tb.is_var() {
-                        return Expr::Term(ta.mul(tb));
-                    };
-                }
-                let oa = a.clone().try_simplify(c);
-                let ob = b.clone().try_simplify(c);
-                let o = Expr::Mul(Box::new(oa.clone()), Box::new(ob.clone()));
-                if !o.has_var() {return o.try_simplify(c)}
-                // Special cases (a*1, 1*b)
-                if let Expr::Term(ta) = oa.clone() {
-                    if ta.is_one() { // 1 * b
-                        return ob;
-                    }
-                }
-                if let Expr::Term(tb) = ob.clone() {
-                    if tb.is_one() { // a * 1
-                        return oa;
-                    }
-                }
-                // Special cases (a*0, 0*b)
-                if let Expr::Term(ta) = oa.clone() {
-                    if ta.is_zero() { // 0 * b
-                        return Term::Float(f64::zero()).into();
-                    }
-                }
-                if let Expr::Term(tb) = ob.clone() {
-                    if tb.is_zero() { // a * 0
-                        return Term::Float(f64::zero()).into();
-                    }
-                }
-                // Rearrangement
-                if let Expr::Term(ta) = oa.clone() { // is oa const
-                    if let Expr::Mul(oba, obb) = ob.clone() { // is ob `Mul`
-                        if let Expr::Term(obta) = *oba { // is obta const
-                            return Expr::Mul(
-                                obb,
-                                Box::new(Expr::Mul(
-                                    Box::new(ta.into()),
-                                    Box::new(obta.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(obtb) = *obb { // is obtb const
-                            return Expr::Mul(
-                                oba,
-                                Box::new(Expr::Mul(
-                                    Box::new(ta.into()),
-                                    Box::new(obtb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                if let Expr::Term(ta) = ob.clone() { // is ob const
-                    if let Expr::Mul(oaa, oab) = oa.clone() { // is oa `Mul`
-                        if let Expr::Term(oata) = *oaa { // is oata const
-                            return Expr::Mul(
-                                oab,
-                                Box::new(Expr::Mul(
-                                    Box::new(ta.into()),
-                                    Box::new(oata.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(oatb) = *oab { // is obtb const
-                            return Expr::Mul(
-                                oaa,
-                                Box::new(Expr::Mul(
-                                    Box::new(ta.into()),
-                                    Box::new(oatb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                return o;
-            },
-            Expr::Pow(a, b) => {
-                if let (Some(ta), Some(tb)) = (a.try_term(), b.try_term()) {
-                    if !ta.is_var() & !tb.is_var() { 
-                        return Expr::Term(ta.pow(tb));
-                    };
-                }
-                let oa = a.clone().try_simplify(c);
-                let ob = b.clone().try_simplify(c);
-                let o = Expr::Pow(Box::new(oa.clone()), Box::new(ob.clone()));
-                if !o.has_var() {return o.try_simplify(c)}
-                // Special cases (a^1, 1^b)
-                if let Expr::Term(ta) = oa.clone() {
-                    if ta.is_one() { // 1 ^ b = 1
-                        return Term::Float(f64::one()).into();
-                    }
-                }
-                if let Expr::Term(tb) = ob.clone() {
-                    if tb.is_one() { // a ^ 1 = a
-                        return oa;
-                    }
-                }
-                // Special cases (a^0, 0^b)
-                if let Expr::Term(ta) = oa.clone() {
-                    if ta.is_zero() { // 0 ^ b = 0
-                        return Term::Float(f64::zero()).into();
-                    }
-                }
-                if let Expr::Term(tb) = ob.clone() {
-                    if tb.is_zero() { // a ^ 0 = 1
-                        return Term::Float(f64::one()).into();
-                    }
-                }
-                if let Expr::Term(ta) = oa.clone() { // is oa const
-                    if let Expr::Pow(oba, obb) = ob.clone() { // is ob `Pow`
-                        if let Expr::Term(obta) = *oba { // is obta const
-                            return Expr::Pow(
-                                obb,
-                                Box::new(Expr::Pow(
-                                    Box::new(ta.into()),
-                                    Box::new(obta.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(obtb) = *obb { // is obtb const
-                            return Expr::Pow(
-                                oba,
-                                Box::new(Expr::Pow(
-                                    Box::new(ta.into()),
-                                    Box::new(obtb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                if let Expr::Term(ta) = ob.clone() { // is ob const
-                    if let Expr::Pow(oaa, oab) = oa.clone() { // is oa `Pow`
-                        if let Expr::Term(oata) = *oaa { // is oata const
-                            return Expr::Pow(
-                                oab,
-                                Box::new(Expr::Pow(
-                                    Box::new(ta.into()),
-                                    Box::new(oata.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                        if let Expr::Term(oatb) = *oab { // is obtb const
-                            return Expr::Pow(
-                                oaa,
-                                Box::new(Expr::Pow(
-                                    Box::new(ta.into()),
-                                    Box::new(oatb.into()),
-                                ))
-                            ).try_simplify(c);
-                        }
-                    }
-                }
-                return o;
-            },
-            Expr::Ln(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() {
-                        return Expr::Term(ta.ln());
-                    };
-                }
-                let o = Expr::Ln(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            }
-            Expr::Neg(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.neg()); };
-                }
-                let o = Expr::Neg(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Inv(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.inv()); };
-                }
-                let o = Expr::Inv(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Abs(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Abs(a.clone()); };
-                    return Expr::Term(ta.abs());
-                }
-                let o = Expr::Abs(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Sin(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.sin()); };
-                }
-                let o = Expr::Sin(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Cos(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.cos()); };
-                }
-                let o = Expr::Cos(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Tan(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.tan()); };
-                }
-                let o = Expr::Tan(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Sinh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.sinh()); };
-                }
-                let o = Expr::Sinh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Cosh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.cosh()); };
-                }
-                let o = Expr::Cosh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Tanh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.tanh()); };
-                }
-                let o = Expr::Tanh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Asin(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.asin()); };
-                }
-                let o = Expr::Asin(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Acos(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.acos()); };
-                }
-                let o = Expr::Acos(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Atan(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.atan()); };
-                }
-                let o = Expr::Atan(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Asinh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.asinh()); };
-                }
-                let o = Expr::Asinh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Acosh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.acosh()); };
-                }
-                let o = Expr::Acosh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Atanh(a) => {
-                if let Some(ta) = a.try_term() {
-                    if !ta.is_var() { return Expr::Term(ta.atanh()); };
-                }
-                let o = Expr::Atanh(Box::new(a.clone().try_simplify(c)));
-                if !o.has_var() {return o.try_simplify(c)}
-                return o;
-            },
-            Expr::Fn(n, args) => {
-                let func = c.funcs.get(n).unwrap();
-                let mut body = func.body.clone();
-                for i in 0..func.args.len() {
-                    Self::replace_var(&mut body, func.args[i].clone(), args[i].clone(), c);
-                };
-                return body.try_simplify(c);
-            },
-        }
-    }
-
-    fn has_var(&self) -> bool {
-        match self {
-            Expr::Term(a) => a.is_var(),
-            Expr::Add(a, b) => a.has_var() | b.has_var(),
-            Expr::Mul(a, b) => a.has_var() | b.has_var(),
-            Expr::Pow(a, b) => a.has_var() | b.has_var(),
-            Expr::Ln(a) => a.has_var(),
-            Expr::Neg(a) => a.has_var(),
-            Expr::Inv(a) => a.has_var(),
-            Expr::Abs(a) => a.has_var(),
-            Expr::Sin(a) => a.has_var(),
-            Expr::Cos(a) => a.has_var(),
-            Expr::Tan(a) => a.has_var(),
-            Expr::Sinh(a) => a.has_var(),
-            Expr::Cosh(a) => a.has_var(),
-            Expr::Tanh(a) => a.has_var(),
-            Expr::Asin(a) => a.has_var(),
-            Expr::Acos(a) => a.has_var(),
-            Expr::Atan(a) => a.has_var(),
-            Expr::Asinh(a) => a.has_var(),
-            Expr::Acosh(a) => a.has_var(),
-            Expr::Atanh(a) => a.has_var(),
-            Expr::Fn(_, args) => args.iter().map(|n| n.has_var()).collect::<Vec<bool>>().contains(&true),
-        }
-    }
-
-    /// Goes through and recursively replaces all the instances of a variable with some expression.
-    fn replace_var(s: &mut Self, var: String, val: Expr, c: &Context) {
-        if C_DEBUG_LEVEL >= 3 {println!("   - replace_var {var:?} with {val:?} in {s:?}")};
-        match s {
-            Expr::Term(Term::Var(n)) => if n.clone() == var {*s = val;},
-            Expr::Term(_) => return,
-            Expr::Add(a, b) => {Self::replace_var(a, var.clone(), val.clone(), c); Self::replace_var(b, var.clone(), val.clone(), c);},
-            Expr::Mul(a, b) => {Self::replace_var(a, var.clone(), val.clone(), c); Self::replace_var(b, var.clone(), val.clone(), c);},
-            Expr::Pow(a, b) => {Self::replace_var(a, var.clone(), val.clone(), c); Self::replace_var(b, var.clone(), val.clone(), c);},
-            Expr::Ln(a) => Self::replace_var(a, var, val, c),
-            Expr::Neg(a) => Self::replace_var(a, var, val, c),
-            Expr::Inv(a) => Self::replace_var(a, var, val, c),
-            Expr::Abs(a) => Self::replace_var(a, var, val, c),
-            Expr::Sin(a) => Self::replace_var(a, var, val, c),
-            Expr::Cos(a) => Self::replace_var(a, var, val, c),
-            Expr::Tan(a) => Self::replace_var(a, var, val, c),
-            Expr::Sinh(a) => Self::replace_var(a, var, val, c),
-            Expr::Cosh(a) => Self::replace_var(a, var, val, c),
-            Expr::Tanh(a) => Self::replace_var(a, var, val, c),
-            Expr::Asin(a) => Self::replace_var(a, var, val, c),
-            Expr::Acos(a) => Self::replace_var(a, var, val, c),
-            Expr::Atan(a) => Self::replace_var(a, var, val, c),
-            Expr::Asinh(a) => Self::replace_var(a, var, val, c),
-            Expr::Acosh(a) => Self::replace_var(a, var, val, c),
-            Expr::Atanh(a) => Self::replace_var(a, var, val, c),
-            Expr::Fn(_, args) => {
-                for i in 0..args.len() {
-                    Self::replace_var(&mut args[i], var.clone(), val.clone(), c);
-                }
-            },
-
-        }
-
-        if C_DEBUG_LEVEL >= 3 { println!("   {s:?}"); };
-    }
-
-    fn try_eval(self, c: &Context) -> Option<Term> {
-        // println!("{self:?} <- {:?}", c.vars);
-        if E_DEBUG_LEVEL >= 2 {println!(" - {self:?}")};
-        if E_DEBUG_LEVEL >= 3 {println!("   - {:?}", c.vars)};
-        Some(match self {
-            Expr::Term(term) => term.unvar(c)?,
-            Expr::Add(a, b) => {a.try_eval(c)?.add(b.try_eval(c)?)},
-            Expr::Mul(a, b) => {a.try_eval(c)?.mul(b.try_eval(c)?)},
-            Expr::Pow(a, b) => {a.try_eval(c)?.pow(b.try_eval(c)?)},
-            Expr::Ln(a) => {a.try_eval(c)?.ln()},
-            Expr::Neg(a) => {a.try_eval(c)?.neg()},
-            Expr::Inv(a) => {a.try_eval(c)?.inv()},
-            Expr::Abs(a) => {a.try_eval(c)?.abs()},
-            Expr::Sin(a) => {a.try_eval(c)?.sin()},
-            Expr::Cos(a) => {a.try_eval(c)?.cos()},
-            Expr::Tan(a) => {a.try_eval(c)?.tan()},
-            Expr::Sinh(a) => {a.try_eval(c)?.sinh()},
-            Expr::Cosh(a) => {a.try_eval(c)?.cosh()},
-            Expr::Tanh(a) => {a.try_eval(c)?.tanh()},
-            Expr::Asin(a) => {a.try_eval(c)?.asin()},
-            Expr::Acos(a) => {a.try_eval(c)?.acos()},
-            Expr::Atan(a) => {a.try_eval(c)?.atan()},
-            Expr::Asinh(a) => {a.try_eval(c)?.asinh()},
-            Expr::Acosh(a) => {a.try_eval(c)?.acosh()},
-            Expr::Atanh(a) => {a.try_eval(c)?.atanh()},
-            Expr::Fn(name, args) => {c.try_fn_eval(name, args)?},
-        })
-    }
     
-    fn try_term(&self) -> Option<Term> {
+    /// Flattens Add and Mul trees
+    pub fn flatten(&self) -> Self {
+        println!("   - flatten {self:?}");
         match self {
-            Self::Term(t) => Some(t.clone()),
-            _ => None,
+            Self::Term(_) => self.clone(),
+            Self::Fn(_, _) => self.clone(),
+            Self::Add(n) => Self::Add(n.iter().flat_map(|a| {a.flatten_add()}).collect()),
+            Self::Mul(n) => Self::Mul(n.iter().flat_map(|a| {a.flatten_mul()}).collect()),
+            Self::Pow(a, b) => Self::Pow(a.flatten().r#box(), b.flatten().r#box()),
         }
     }
-}
-impl From<f64> for Expr {
-    fn from(value: f64) -> Self {
-        Expr::Term(value.into())
-    }
-}
-impl From<Term> for Expr {
-    fn from(value: Term) -> Self {
-        Expr::Term(value)
-    }
-}
-
-
-macro_rules! impl_trig {
-    ($f:ident) => {
-        fn $f(self) -> Self {
-            match self {
-                Term::Var(_) => panic!(),
-                Term::Float(n) => Term::Float(n.$f()),
-                Term::Complex(n) => Term::Complex(n.$f()),
-            }
+    fn flatten_mul(&self) -> Vec<Expr> {
+        println!("   - flatten {self:?}");
+        match self {
+            Self::Mul(n) => n.iter().flat_map(|a| a.flatten_mul()).collect(),
+            o => [o.flatten()].to_vec(),
         }
-    };
-}
+    }
+    fn flatten_add(&self) -> Vec<Expr> {
+        println!("   - flatten {self:?}");
+        match self {
+            Self::Add(n) => n.iter().flat_map(|a| a.flatten_add()).collect(),
+            o => [o.flatten()].to_vec(),
+        }
+    }
 
+    /// Expand all instances of a variable into an expression.
+    pub fn expand_vars(&self, vars: &Vec<(String, Exp)>) -> Self {
+        println!("   - {self:?}");
+        match self {
+            // * the recursive expansion is necessary to be complete with one call of `expand_vars`
+            Self::Term(t) => t.expand_vars(vars),
+            Self::Add(n) => Self::Add(n.iter().map(|a| a.expand_vars(vars)).collect()),
+            Self::Mul(n) => Self::Mul(n.iter().map(|a| a.expand_vars(vars)).collect()),
+            Self::Pow(a, b) => Self::Pow((*a).expand_vars(vars).r#box(), (*b).expand_vars(vars).r#box()),
+            Self::Fn(s, n) => Self::Fn(s.clone(), n.iter().map(|a| a.expand_vars(vars).r#box()).collect()),
+        }
+    }
 
+    /// Expand all instances of a function into an expression.
+    pub fn expand_funcs(&self, funcs: &HashMap<String, Func>) -> Self {
+        match self {
+            Self::Term(_) => self.clone(),
+            Self::Fn(name, args) => {
+                let f = funcs.get(name).unwrap();
+                if f.recursive {
+                    return self.clone();
+                }
+                let b = f.body.expand_vars(&f.args.clone().into_iter().zip(args.iter().map(|a| a.clone().r#box())).collect());
+                b.expand_funcs(funcs)
+            },
+            Self::Add(n) => Self::Add(n.iter().map(|a| a.expand_funcs(funcs)).collect()),
+            Self::Mul(n) => Self::Mul(n.iter().map(|a| a.expand_funcs(funcs)).collect()),
+            Self::Pow(a,b) => Self::Pow(a.expand_funcs(funcs).r#box(), b.expand_funcs(funcs).r#box()),
+        }
+    }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum Term {
-    Var(String),
-    Float(f64),
-    Complex(Complex64),
-}
-impl Term {
+    /// Reduce constant nodes into terms.
+    pub fn reduce_const(&self) -> Self {
+        match self {
+            Self::Term(_) => self.clone(),
+            Self::Add(n) => {
+                // Reduce const for all items
+                let mut n: Vec<Expr> = n.iter().map(|a| a.reduce_const()).collect();
 
-    impl_trig!(sin);
-    impl_trig!(cos);
-    impl_trig!(tan);
-    impl_trig!(sinh);
-    impl_trig!(cosh);
-    impl_trig!(tanh);
-    impl_trig!(asin);
-    impl_trig!(acos);
-    impl_trig!(atan);
-    impl_trig!(asinh);
-    impl_trig!(acosh);
-    impl_trig!(atanh);
+                // Sort the items so constants are first, then find the cutoff where the items are no longer 
+                // constant.
+                n.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                let mut cutoff = usize::MAX;
+                for i in 0..n.len() {
+                    if !n[i].is_const() {break}
+                    cutoff = i+1;
+                }
 
-    fn is_var(&self) -> bool {
-        match &self {
-            Self::Var(_) => true,
+                println!("   - simplify {n:?}");
+
+                // No constants found
+                if cutoff == usize::MAX {
+                    return Self::Add(n);
+                }
+
+                // Accumulate all of the constant values
+                let c = n[1..cutoff].iter().fold(n[0].force_const(),|acc, a| acc + a.force_const());
+
+                // If all of the values were constant, return a term.
+                if cutoff == n.len() {
+                    return *f::term(c);
+                }
+
+                // Return the same terms with the reduced constant at the front.
+                return Self::Add(vec![&[Expr::from(c)],n.split_at(cutoff).1].concat());
+            },
+            Self::Mul(n) => {
+                // Reduce const for all items
+                let mut n: Vec<Expr> = n.iter().map(|a| a.reduce_const()).collect();
+
+                // Sort the items so constants are first, then find the cutoff where the items are no longer 
+                // constant.
+                n.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                let mut cutoff = usize::MAX;
+                for i in 0..n.len() {
+                    if !n[i].is_const() {break}
+                    cutoff = i+1;
+                }
+
+                println!("   - simplify {n:?}");
+
+                // No constants found
+                if cutoff == usize::MAX {
+                    return Self::Mul(n);
+                }
+
+                // Accumulate all of the constant values
+                let c = n[1..cutoff].iter().fold(n[0].force_const(),|acc, a| acc * a.force_const());
+
+                // If all of the values were constant, return a term.
+                if cutoff == n.len() {
+                    return *f::term(c);
+                }
+
+                // Return the same terms with the reduced constant at the front.
+                return Self::Mul(vec![&[Expr::from(c)],n.split_at(cutoff).1].concat());
+            },
+            Self::Pow(a, b) => {
+                let a = a.reduce_const();
+                let b = b.reduce_const();
+                if a.is_const() & b.is_const() {
+                    return (a.force_const().pow(b.force_const())).into();
+                }
+                Self::Pow(a.r#box(), b.r#box())
+            },
+            Self::Fn(_, _) => self.clone(),
+        }
+    }
+
+    /// Reorders some add and mul operations to put constant terms first.
+    /// This aids in other simplification processes.
+    pub fn reorder(&self) -> Self {
+        match self {
+            Self::Add(n) => {
+                let mut n = n.clone();
+                n.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                return Self::Add(n.to_vec());
+            },
+            Self::Mul(n) => {
+                let mut n = n.clone();
+                n.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
+                return Self::Mul(n.to_vec());
+            },
+            // Only Add and Mul are commutative.
+            _ => self.clone(),
+        }
+    }
+
+    /// Simplifies special cases like adding 0. Assumes constants have been reduced already.
+    pub fn special_cases(&self) -> Self {
+        // Special cases for single input operations are unnecessary as all constant inputs for those
+        // will get simplified out in constant reduction.
+        match self {
+            Self::Add(n) => {
+                if n[0].is_zero() { return Self::Add(n.split_at(1).1.to_vec()) } // 0 + n
+                return self.clone();
+            },
+            Self::Mul(n) => {
+                if n[0].is_one() { return Self::Mul(n.split_at(1).1.to_vec()) } // 1 * n
+                return self.clone();
+            },
+            Self::Pow(a, b) => {
+                if a.is_zero() { return *f::num(0.0) }  // 0^b
+                if b.is_zero() { return *f::num(1.0) }  // a^0
+                if a.is_one()  { return *f::num(1.0) }  // 1^b
+                if b.is_one()  { return *a.clone() }    // a^1
+                return self.clone();
+            },
+            _ => return self.clone(),
+        }
+    }
+
+    /// Try to factor out multiplications and additions.
+    pub fn factor(&self) -> Self {unimplemented!()}
+
+    /// Try to find common factors in fractions.
+    pub fn simplify_div(&self) -> Self {unimplemented!()}
+
+    /// For small integer powers, expand them into multiplication.
+    pub fn expand_pow(&self) -> Self {
+        match self {
+            Self::Pow(a, b) => {
+                if !b.is_const() {return self.clone();}
+                let b = b.force_const();
+                if b == Term::from(2.0) { return Self::Mul(vec![*a.clone(); 2]); }
+                if b == Term::from(3.0) { return Self::Mul(vec![*a.clone(); 3]); }
+                if b == Term::from(4.0) { return Self::Mul(vec![*a.clone(); 4]); }
+                if b == Term::from(5.0) { return Self::Mul(vec![*a.clone(); 5]); }
+                return self.clone();
+            },
+            Self::Add(n) => Self::Add(n.iter().map(|a| a.expand_pow()).collect()),
+            Self::Mul(n) => Self::Mul(n.iter().map(|a| a.expand_pow()).collect()),
+            Self::Fn(_, _) => self.clone(),
+            Self::Term(_) => self.clone(),
+        }
+    }
+
+    /// Checks if this expression tree contains a variable.
+    /// Search includes other variables in a `Context`.
+    pub fn has_var(&self, var: &String, c: &Context) -> bool {
+        match self {
+            Self::Term(Term::Var(v)) => {
+                if v == var {return true}
+                if let Some(other_var) = c.vars.get(v) {
+                    return other_var.has_var(var, c);
+                }
+                return false;
+            },
+            Self::Term(_) => false,
+            Self::Add(n) => n.iter().map(|a| a.has_var(var, c)).collect::<Vec<bool>>().contains(&true),
+            Self::Mul(n) => n.iter().map(|a| a.has_var(var, c)).collect::<Vec<bool>>().contains(&true),
+            Self::Pow(a, b) => a.has_var(var, c) | b.has_var(var, c),
+            Self::Fn(_, a) => a.iter().map(|a| a.has_var(var, c)).collect::<Vec<bool>>().contains(&true),
+        }
+    }
+
+    /// Checks if this expression tree contains a function.
+    /// Search includes other functions in a `Context`.
+    pub fn has_fn(&self, name: &String, c: &Context) -> bool {
+        match self {
+            Self::Term(_) => false,
+            Self::Add(n) => n.iter().map(|a| a.has_fn(name, c)).collect::<Vec<bool>>().contains(&true),
+            Self::Mul(n) => n.iter().map(|a| a.has_fn(name, c)).collect::<Vec<bool>>().contains(&true),
+            Self::Pow(a, b) => a.has_fn(name, c) | b.has_fn(name, c),
+            Self::Fn(_, _) => true,
+        }
+    }
+
+    /// Checks if `self` is negative
+    pub fn is_neg(&self) -> bool {
+        match self {
+            Self::Mul(n) => n[0].is_neg_one(),
+            _ => false,
+        }
+    }
+    /// Checks if `self` is an inverse.
+    pub fn is_inv(&self) -> bool {
+        match self {
+            Self::Pow(_, p) => {
+                if p.is_const() {
+                    return p.force_const().is_neg_one();
+                }
+                false
+            },
+            _ => false,
+        }
+    }
+    /// Checks if `self` is a commutative operation.
+    pub fn is_commutative(&self) -> bool {
+        match self {
+            Self::Add(_,) | Self::Mul(_,) => true,
+            _ => false,
+        }
+    }
+    /// Checks if `self` is a term.
+    pub fn is_term(&self) -> bool {
+        match self {
+            Self::Term(_) => true,
+            _ => false,
+        }
+    }
+    // Checks if `self` is zero.
+    pub fn is_zero(&self) -> bool {
+        match self {
+            Self::Term(t) => t.is_zero(),
+            _ => false,
+        }
+    }
+    // Checks if `self` is one.
+    pub fn is_one(&self) -> bool {
+        match self {
+            Self::Term(t) => t.is_one(),
+            _ => false,
+        }
+    }
+    /// Checks if `self` is -1 of some kind. Assumes consts have been reduced, does not reduce consts to check.
+    pub fn is_neg_one(&self) -> bool {
+        match self {
+            Self::Term(t) => t.is_neg_one(),
+            _ => false,
+        }
+    }
+    /// Checks if `self` is a constant term.
+    pub fn is_const(&self) -> bool {
+        match self {
+            Self::Term(t) => t.is_const(),
             _ => false,
         }
     }
 
-    fn abs(self) -> Term {
+    /// Force `self` into a const `Term`, panics if it can't.
+    pub fn force_const(&self) -> Term {
         match self {
-            Term::Var(_) => panic!(),
-            Term::Float(n) => Term::Float(n.abs()),
-            Term::Complex(n) => Term::Float(n.norm()),
-        }
-    }
-
-    fn pow(self, rhs: Self) -> Term {
-        match (self, rhs) {
-            (Term::Float(a), Term::Float(b)) => a.pow(b).into(),
-            (Term::Complex(a), Term::Float(b)) => Term::Complex(a.powf(b)),
-            (Term::Float(a), Term::Complex(b)) => Term::Complex(a.powc(b)),
-            (Term::Complex(a), Term::Complex(b)) => Term::Complex(a.powc(b)),
+            Self::Term(t) => t.force_const(),
             _ => panic!(),
         }
     }
 
-    fn ln(self) -> Term {
+    pub fn order_num(&self) -> u8 {
         match self {
-            Term::Var(_) => panic!(),
-            Term::Float(a) => a.ln().into(),
-            Term::Complex(a) => Term::Complex(a.ln()),
+            Self::Term(Term::Real(_)) => 0,
+            Self::Term(Term::Complex(_)) => 0,
+            Self::Term(Term::Var(_)) => 1,
+            _ => 2,
         }
     }
 
-    fn unvar(&self, c: &Context) -> Option<Self> {
-        Some(match self {
-            Term::Var(n) => {
-                // println!("unvar {n}!");
-                c.evaluate(&n[..])?
-            },
-            Term::Float(_) => self.clone(),
-            Term::Complex(_) => self.clone(),
-        })
-    }
 
-    /// Tries to expand the variable. If `self` is not a variable, returns `None`.
-    fn expand(&self, c: &Context) -> Option<Expr> {
-        Some(match self {
-            Term::Var(n) => {
-                c.vars.get(n)?.clone()
-            },
-            _ => return None,
-        })
+    /// Boxes up `self`
+    pub fn r#box(self) -> Exp {
+        Box::new(self)
     }
+}
+impl From<Term> for Expr {
+    fn from(value: Term) -> Self {
+        Self::Term(value)
+    }
+}
+impl PartialOrd for Expr {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.order_num().partial_cmp(&other.order_num())
+    }
+}
 
-    /// Checks if the value of `self` is 1 of some kind.
-    fn is_one(&self) -> bool {
+
+/// A term in the expression tree.
+#[derive(Debug, Clone)]
+pub enum Term {
+    Real(f64),
+    Complex(Complex64),
+    Var(String),
+}
+impl Term {
+
+    /// Checks if `self` is const.
+    pub fn is_const(&self) -> bool {
         match self {
-            Term::Float(1.0) => true,
-            Term::Complex(Complex64::ONE) => true,
+            Self::Var(_) => false,
+            Self::Real(_) => true,
+            Self::Complex(_) => true,
+        }
+    }
+
+    /// Panics if `self` is not const.
+    pub fn force_const(&self) -> Self {
+        match self {
+            Self::Var(_) => panic!(),
+            Self::Real(_) => self.clone(),
+            Self::Complex(_) => self.clone(),
+        }
+    }
+
+    /// Returns an expression if `self` is the Variable `var`.
+    pub fn expand_vars(&self, vars: &Vec<(String, Exp)>) -> Expr {
+        let mut t = f::term(self.clone());
+        for (var, val) in vars {
+            match self {
+                Self::Var(n) => {if n == var {t = (*val).expand_vars(vars).r#box()}},
+                _ => (),
+            }
+        }
+        return *t;
+    }
+
+    pub fn is_neg_one(&self) -> bool {
+        match self {
+            Self::Real(n) => (-n).is_one(),
+            Self::Complex(n) => (-n).is_one(),
             _ => false,
         }
     }
+}
+impl FromStr for Term {
+    type Err = ();
 
-    /// Checks if the value of `self` is 0 of some kind.
-    fn is_zero(&self) -> bool {
-        match self {
-            Term::Float(0.0) => true,
-            Term::Complex(Complex64::ZERO) => true,
-            _ => false,
-        }
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::Var(s.to_string()))
     }
 }
-impl Add for Term {
-    type Output = Self;
-
-    fn add(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Term::Var(_), _) => panic!(),
-            (_, Term::Var(_)) => panic!(),
-            (Term::Float(a), Term::Float(b)) => Term::Float(a + b),
-            (Term::Float(a), Term::Complex(b)) => Term::Complex(a + b),
-            (Term::Complex(a), Term::Float(b)) => Term::Complex(a + b),
-            (Term::Complex(a), Term::Complex(b)) => Term::Complex(a + b),
-        }
-    }
-}
-impl Mul for Term {
-    type Output = Self;
-
-    fn mul(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Term::Var(_), _) => panic!(),
-            (_, Term::Var(_)) => panic!(),
-            (Term::Float(a), Term::Float(b)) => Term::Float(a * b),
-            (Term::Float(a), Term::Complex(b)) => Term::Complex(a * b),
-            (Term::Complex(a), Term::Float(b)) => Term::Complex(a * b),
-            (Term::Complex(a), Term::Complex(b)) => Term::Complex(a * b),
-        }
-    }
-}
-impl Inv for Term {
-    type Output = Self;
-
-    fn inv(self) -> Self::Output {
-        match self {
-            Term::Var(_) => panic!(),
-            Term::Float(n) => Term::Float(n.inv()),
-            Term::Complex(n) => Term::Complex(n.inv()),
-        }
-    }
-}
-impl Neg for Term {
-    type Output = Self;
-
-    fn neg(self) -> Self::Output {
-        match self {
-            Term::Var(_) => panic!(),
-            Term::Float(n) => Term::Float(n.neg()),
-            Term::Complex(n) => Term::Complex(n.neg()),
-        }
+impl From<String> for Term {
+    fn from(value: String) -> Self {
+        Term::Var(value)
     }
 }
 impl From<f64> for Term {
     fn from(value: f64) -> Self {
-        Term::Float(value)
+        Term::Real(value)
     }
 }
-impl std::fmt::Display for Term {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl From<Complex64> for Term {
+    fn from(value: Complex64) -> Self {
+        Term::Complex(value)
+    }
+}
+impl Zero for Term {
+    fn zero() -> Self {
+        Self::Real(f64::zero())
+    }
+
+    fn is_zero(&self) -> bool {
         match self {
-            Self::Var(n) => write!(f, "{n}"),
-            Self::Float(n) => write!(f, "{n:00.2}"),
-            Self::Complex(n) => write!(f, "{n}"),
+            Self::Real(n) => n.is_zero(),
+            Self::Complex(n) => n.is_zero(),
+            _ => false,
+        }
+    }
+}
+impl One for Term {
+    fn one() -> Self {
+        Self::Real(f64::one())
+    }
+    
+    fn is_one(&self) -> bool {
+        match self {
+            Self::Real(n) => n.is_one(),
+            Self::Complex(n) => n.is_zero(),
+            _ => false,
+        }
+    }
+}
+impl Add<Term> for Term {
+    type Output = Term;
+
+    fn add(self, rhs: Term) -> Self::Output {
+        match (self, rhs) {
+            (Term::Real(a), Term::Real(b)) => (a+b).into(),
+            (Term::Real(a), Term::Complex(b)) => (a+b).into(),
+            (Term::Complex(a), Term::Real(b)) => (a+b).into(),
+            (Term::Complex(a), Term::Complex(b)) => (a+b).into(),
+            _ => panic!(),
+        }
+    }
+}
+impl Mul<Term> for Term {
+    type Output = Self;
+
+    fn mul(self, rhs: Term) -> Self::Output {
+        match (self, rhs) {
+            (Term::Real(a), Term::Real(b)) => (a*b).into(),
+            (Term::Real(a), Term::Complex(b)) => (a*b).into(),
+            (Term::Complex(a), Term::Real(b)) => (a*b).into(),
+            (Term::Complex(a), Term::Complex(b)) => (a*b).into(),
+            _ => panic!(),
+        }
+    }
+}
+impl Pow<Term> for Term {
+    type Output = Self;
+
+    fn pow(self, rhs: Term) -> Self::Output {
+        match (self, rhs) {
+            (Term::Real(a), Term::Real(b)) => (a.pow(b)).into(),
+            (Term::Real(a), Term::Complex(b)) => (a.powc(b)).into(),
+            (Term::Complex(a), Term::Real(b)) => (a.pow(b)).into(),
+            (Term::Complex(a), Term::Complex(b)) => (a.pow(b)).into(),
+            _ => panic!(),
+        }
+    }
+}
+/// Orders terms based on how they should be ordered in expressions. (less -> more)
+impl PartialOrd for Term {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match (self, other) {
+            (Term::Real(_), Term::Real(_)) => Some(std::cmp::Ordering::Equal),
+            (Term::Real(_), Term::Complex(_)) => Some(std::cmp::Ordering::Equal),
+            (Term::Real(_), Term::Var(_)) => Some(std::cmp::Ordering::Less),
+            (Term::Complex(_), Term::Real(_)) => Some(std::cmp::Ordering::Equal),
+            (Term::Complex(_), Term::Complex(_)) => Some(std::cmp::Ordering::Equal),
+            (Term::Complex(_), Term::Var(_)) => Some(std::cmp::Ordering::Less),
+            (Term::Var(_), Term::Real(_)) => Some(std::cmp::Ordering::Greater),
+            (Term::Var(_), Term::Complex(_)) => Some(std::cmp::Ordering::Greater),
+            (Term::Var(a), Term::Var(b)) => a.partial_cmp(b),
+        }
+    }
+}
+
+impl PartialEq for Term {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Real(a), Self::Real(b)) => a == b,
+            (Self::Real(a), Self::Complex(b)) => Complex64::from(a) == *b,
+            (Self::Complex(a), Self::Real(b)) => a == &Complex64::from(b),
+            (Self::Complex(a), Self::Complex(b)) => a == b,
+            (Self::Var(a), Self::Var(b)) => a == b,
+            _ => false,
         }
     }
 }

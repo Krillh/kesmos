@@ -4,8 +4,9 @@ This is where the data for the parsel parser is.
 */
 
 
+use kw::recursive;
 use parsel::{
-    self, ast::{Brace, LeftAssoc, LitFloat, LitInt, Many, Paren, Punctuated}, parse_str, syn::{token::{Caret, Comma, Eq, Fn, Let, Minus, Plus, Semi, Slash, Star}, Ident, Token}, Parse, ToTokens
+    self, ast::{Brace, LeftAssoc, LitFloat, LitInt, Many, Maybe, Paren, Punctuated}, parse_str, syn::{token::{Caret, Comma, Eq, Fn, Let, Minus, Plus, Semi, Slash, Star}, Ident, Token}, Parse, ToTokens
 };
 
 // Custom keywords
@@ -32,6 +33,7 @@ mod kw {
     custom_keyword!(sqrt);
     custom_keyword!(cbrt);
 
+    custom_keyword!(recursive);
 
 }
 
@@ -51,6 +53,7 @@ pub enum Statement {
     },
     Fn {
         kw_fn: Fn,
+        recursive: Maybe<Paren<recursive>>,
         name: Ident,
         args: Paren<Punctuated<Ident, Comma>>,
         kw_eq: Eq,

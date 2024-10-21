@@ -3,20 +3,16 @@
 
 ## Important
 
-- [ ] redo the whole expr module
+- [x] redo the whole expr module
 - [ ] rework simplification and evaluation
-  - [ ] add a field to the parsel `Fn` struct to include an optional `(recursive)` after the `fn` keyword
-  - [ ] change `.simplify()` to return an `Expr` and take in a variable name
-  - [ ] make a `set_var` function for the new struct `VarContext` that expands a variable to some `Expr`
+  - [x] make `add` and `mul` multi-input instead of binary
+  - [x] re-add function support to `expr.rs`
+  - [x] add a field to the parsel `Fn` struct to include an optional `(recursive)` after the `fn` keyword
+  - [x] change `.simplify()` to return an `Expr` and take in a variable name
   - [ ] change `.evaluate()` to evaluate an Expr & recursive functions
 
 ## Maintenance
 
-- [ ] comment code
-  - [ ] comment `expr.rs`
-  - [ ] comment `parse.rs`
-  - [ ] comment `convert.rs`
-- [ ] make tests
 - [ ] make docs
   - [ ] update `README.md`
   - [x] make spec for the DSL
