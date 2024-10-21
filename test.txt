@@ -1,9 +1,0 @@
-
-
-fn gaus(t, f, n) = e ^ ((-2 * t^2 * pi * f) / (2 * n));
-
-fn spiral(t, f, n) = e ^ (2 * i * pi * f * t);
-
-fn wavelet(t, f, n) =  spiral(t, f, n) * gaus(t, f, n);
-
-let out = wavelet(x, 3, 9);
